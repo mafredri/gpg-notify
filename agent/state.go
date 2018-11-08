@@ -114,7 +114,7 @@ func (s *State) LogUpdate(line []byte) error {
 	case gpgPrivateKeySign:
 		n := gosxnotifier.NewNotification("Sign Request!")
 		n.AppIcon = "resources/gpg.png"
-		n.ContentImage = "resources/octocat.png"
+		n.ContentImage = "resources/git.png"
 		n.Sound = gosxnotifier.Pop
 		return n.Push()
 
