@@ -37,4 +37,3 @@ debug 1024
 - Daemonize this tool
 - Move out notifications into separate project?
 - Attribute icons
--
