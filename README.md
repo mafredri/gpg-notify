@@ -25,9 +25,16 @@ $ go get -u github.com/mafredri/gpg-notify
 Modify `~/.gnupg/gpg-agent.conf`:
 
 ```
-log-file socket:///Users/myuser/.gnupg/S.gpg-agent.log
+log-file socket:///Users/myuser/.gnupg/S.log
 debug-pinentry
 debug 1024
+```
+
+Modify `~/.gnupg/scdaemon.conf`:
+
+```
+log-file socket:///Users/myuser/.gnupg/S.log
+debug 2048
 ```
 
 ## TODO

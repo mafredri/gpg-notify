@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,12 +26,34 @@ type State struct {
 	sshfd       map[string]*sshState
 	lastSSHFD   string
 	lastDebugFD string
+
+	buf *messageBuffer
 }
 
 // New returns a new, empty, State.
 func New() *State {
-	return &State{
+	s := &State{
 		sshfd: make(map[string]*sshState),
+
+		buf: newMessageBuffer(),
+	}
+	go s.watch()
+	return s
+}
+
+func (s *State) Close() error {
+	close(s.buf.c)
+	return nil
+}
+
+func (s *State) watch() {
+	for m := range s.buf.get() {
+		s.buf.load()
+
+		err := s.LogUpdate(m)
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
 }
 
@@ -38,7 +61,7 @@ var (
 	agentRe    = regexp.MustCompile("^gpg-agent\\[(?P<pid>[0-9]+)\\]: (?P<message>.+)$")
 	scdaemonRe = regexp.MustCompile("^scdaemon\\[(?P<pid>[0-9]+)\\]: (?P<message>.+)$")
 
-	debugRe                = regexp.MustCompile("^DBG: chan_(?P<chan>[0-9]+) (?P<chan_dir>-[<>]) (?P<command>.+)$")
+	debugRe                = regexp.MustCompile("^DBG: chan_(?P<chan>[0-9]+) (?P<chan_dir>-?[<>]-?) (?P<command>.+)$")
 	sshHandlerRe           = regexp.MustCompile("^ssh handler [^ ]+ for fd (?P<fd>[0-9]+) (?P<action>.+)$")
 	sshRequestRe           = regexp.MustCompile("^ssh request handler for (?P<action>[a-z_]+) \\([0-9]+\\) (?P<status>.+)$")
 	sshSignRequestFailedRe = regexp.MustCompile("^ssh sign request failed: (.+)$")
@@ -68,25 +91,50 @@ const (
 	sshAddIdentityReady
 	sshSignRequestFailed
 
+	ignoredMessage
 	unhandledMessage
 )
 
+func (s *State) Add(logline []byte) {
+	s.buf.store(logline)
+}
+
 // LogUpdate parses the log line and updates State.
 func (s *State) LogUpdate(line []byte) error {
-	if !agentRe.Match(line) {
+	var from, message string
+
+	switch {
+	case agentRe.Match(line):
+		from = "gpg-agent"
+		match := agentRe.FindAllStringSubmatch(string(line), -1)[0]
+		pid := match[1]
+		if pid != s.pid {
+			if s.pid != "" {
+				fmt.Printf("gpg-agent with pid %s replaced by %s\n", s.pid, pid)
+			}
+			s.pid = pid
+		}
+		message = match[2]
+
+	case scdaemonRe.Match(line):
+		from = "scdaemon"
+		match := scdaemonRe.FindAllStringSubmatch(string(line), -1)[0]
+		// pid := match[1]
+		// if pid != s.pid {
+		// 	if s.pid != "" {
+		// 		fmt.Printf("scdaemon with pid %s replaced by %s\n", s.pid, pid)
+		// 	}
+		// 	s.pid = pid
+		// }
+		message = match[2]
+
+		if s.scdaemonDebugState(message) == ignoredMessage {
+			return nil
+		}
+
+	default:
 		return errors.Errorf("bad log line: %q", line)
 	}
-	match := agentRe.FindAllStringSubmatch(string(line), -1)[0]
-
-	pid := match[1]
-	if pid != s.pid {
-		if s.pid != "" {
-			fmt.Printf("gpg-agent with pid %s replaced by %s\n", s.pid, pid)
-		}
-		s.pid = pid
-	}
-
-	message := match[2]
 
 	state, payload := s.logState(message)
 	if state == debugMessage {
@@ -99,13 +147,13 @@ func (s *State) LogUpdate(line []byte) error {
 
 	switch state {
 	case gpgRemoteProcessConnected:
-		rp, err := findProcessByFD(s.pid, s.lastDebugFD)
-		if err != nil {
-			fmt.Println("okPleasedToMeetYou", err)
-			return nil
-		}
-		pp := findParentByPID(rp.ParentPID)
-		fmt.Println(rp.PID, rp.Command, "requesting stuff... by:", rp.ParentPID, pp.Name, pp.Cmdline)
+		// rp, err := findProcessByFD(s.pid, s.lastDebugFD)
+		// if err != nil {
+		// 	fmt.Println("okPleasedToMeetYou", err)
+		// 	return nil
+		// }
+		// pp := findParentByPID(rp.ParentPID)
+		// fmt.Println(rp.PID, rp.Command, "requesting stuff... by:", rp.ParentPID, pp.Name, pp.Cmdline)
 
 	case gpgRemoteProcessDisconnected:
 	case gpgPinentryConnected:
@@ -139,13 +187,13 @@ func (s *State) LogUpdate(line []byte) error {
 		ssh := &sshState{}
 		s.sshfd[s.lastSSHFD] = ssh
 
-		rp, err := findProcessByFD(s.pid, s.lastSSHFD)
-		if err != nil {
-			fmt.Println("sshHandlerStarted", err)
-			return nil
-		}
-		pp := findParentByPID(rp.ParentPID)
-		fmt.Println(rp.PID, rp.Command, "requesting stuff...", pp.PID, pp.Name, pp.Cmdline)
+		// rp, err := findProcessByFD(s.pid, s.lastSSHFD)
+		// if err != nil {
+		// 	fmt.Println("sshHandlerStarted", err)
+		// 	return nil
+		// }
+		// pp := findParentByPID(rp.ParentPID)
+		// fmt.Println(rp.PID, rp.Command, "requesting stuff...", pp.PID, pp.Name, pp.Cmdline)
 
 	case sshHandlerClosed:
 		delete(s.sshfd, payload)
@@ -165,8 +213,10 @@ func (s *State) LogUpdate(line []byte) error {
 	case sshAddIdentityStarted:
 	case sshAddIdentityReady:
 	case sshSignRequestFailed:
+	case ignoredMessage:
+		// Ignore.
 	case unhandledMessage:
-		// log.Println(message, "[unhandled]")
+		log.Printf("%s: %q [unhandled]\n", from, message)
 	default:
 		panic("not reachable")
 	}
@@ -217,6 +267,9 @@ func (s *State) logState(message string) (messageType, string) {
 	case sshSignRequestFailedRe.MatchString(message):
 		return sshSignRequestFailed, ""
 
+	case strings.Contains(message, "DBG: agent_cache_housekeeping"):
+		return ignoredMessage, ""
+
 	default:
 		return unhandledMessage, ""
 	}
@@ -237,9 +290,12 @@ func (s *State) debugState(chfd, chdir, command string) (messageType, string) {
 		return gpgPinentryConnected, ""
 	case send && command == "BYE":
 		return gpgPinentryDisconnected, ""
+
 	case send && strings.HasPrefix(command, "OPTION owner"):
 		owner := strings.Join(strings.Split(command, "=")[1:], "=")
 		return gpgPinentryOwner, owner
+	case strings.HasPrefix(command, "OPTION"):
+		return ignoredMessage, ""
 
 	case send && strings.HasPrefix(command, "PKSIGN"):
 		return gpgPrivateKeySign, ""
@@ -258,12 +314,57 @@ func (s *State) debugState(chfd, chdir, command string) (messageType, string) {
 		// SmartCard reset?
 		return unhandledMessage, ""
 
+	case command == "OK":
+		return ignoredMessage, "" // send / recv.
+
 	case !send && !recv:
 		panic("unknown chdir " + chdir)
 
 	default:
 		return unhandledMessage, ""
 	}
+}
+
+func (s *State) scdaemonDebugState(msg string) messageType {
+	switch {
+	case msg == "check_pcsc_pinpad: command=20, r=27265":
+		// Asking for pin.....
+		return unhandledMessage
+
+	case msg == "send apdu: c=00 i=2A p1=80 p2=86 lc=513 le=256 em=-254":
+		// Decrypt waiting... (GPG, YK touch)
+	case msg == "send apdu: c=00 i=2A p1=9E p2=9A lc=83 le=256 em=0":
+		// Sign Waiting... (GPG, YK touch)
+	case msg == "send apdu: c=00 i=88 p1=00 p2=00 lc=35 le=256 em=0":
+		// Auth Waiting... (SSH, YK touch)
+
+	case strings.Contains(msg, "response:"):
+		// Response to an apdu.
+		// response: sw=???? datalen=???
+
+	case containsOneOf(msg,
+		"pcsc_get_status_change:",
+		"ccid open error: skip",
+		"PCSC_data:",
+		"dump:",
+		"PCSC_data:",
+	):
+		return ignoredMessage
+
+	default:
+		return unhandledMessage
+	}
+
+	return unhandledMessage
+}
+
+func containsOneOf(s string, substr ...string) bool {
+	for _, ss := range substr {
+		if strings.Contains(s, ss) {
+			return true
+		}
+	}
+	return false
 }
 
 func findProcessByFD(agentPID string, fd string) (p lsof.Process, err error) {

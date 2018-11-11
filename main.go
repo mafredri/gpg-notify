@@ -34,16 +34,12 @@ func main() {
 	}
 }
 
-func socketReader(c net.Conn) {
+func socketReader(c net.Conn, a *agent.State) {
 	defer c.Close()
 
-	agent := agent.New()
 	s := bufio.NewScanner(c)
 	for s.Scan() {
-		err := agent.LogUpdate(s.Bytes())
-		if err != nil {
-			fmt.Println(err)
-		}
+		a.Add(s.Bytes())
 	}
 	if err := s.Err(); err != nil {
 		log.Println(err)
@@ -65,7 +61,7 @@ func run(ctx context.Context) error {
 	}
 
 	if !strings.HasPrefix(agentSock, "socket://") {
-		return errors.New(fmt.Sprintf("missing gpg-agent config: log-file socket://%s/%s", homedir, "S.gpg-agent.log"))
+		return errors.New(fmt.Sprintf("missing gpg-agent config: log-file socket://%s/%s", homedir, "S.log"))
 	}
 	agentSock = strings.Replace(agentSock, "socket://", "", 1)
 
@@ -84,6 +80,9 @@ func run(ctx context.Context) error {
 	}()
 	defer l.Close()
 
+	a := agent.New()
+	defer a.Close()
+
 	for {
 		fd, err := l.Accept()
 		if err != nil {
@@ -95,7 +94,7 @@ func run(ctx context.Context) error {
 			return errors.Wrap(err, "accept error")
 		}
 
-		go socketReader(fd)
+		go socketReader(fd, a)
 	}
 }
 
