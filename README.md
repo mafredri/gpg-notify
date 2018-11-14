@@ -37,3 +37,6 @@ debug 1024
 - Daemonize this tool
 - Move out notifications into separate project?
 - Attribute icons
+- Think about security aspects:
+    - Detection (and notificon) when gpg-agent / scdaemon is restarted
+    - Only allow gpg-agent / scdaemon to connect and write to socket
